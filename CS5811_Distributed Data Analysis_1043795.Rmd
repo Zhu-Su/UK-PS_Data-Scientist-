@@ -1,0 +1,1342 @@
+---
+title: "CS5811_Distributed Data Analysis_1043795"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#1.=====================================
+#Load packages
+```{r}
+#Load packages
+library(Amelia)
+library(arm)
+library(av)
+library(caret)
+library(class)
+library(cluster)
+library(data.table)
+library(devtools)
+library(dplyr)
+library(dygraphs)
+library(e1071)
+library(forecast)
+library(gapminder)
+library(gganimate)
+library(ggfortify)
+#library(ggbiplot) package ‘ggbiplot’ is not available (for R version 4.0.2)
+library(ggpubr)
+library(ggplot2)
+library(gifski)
+library(grid)
+library(gridExtra)
+library(Hmisc)
+library(janitor)
+library(lobstr)
+library(lubridate)
+library(mapview)
+library(mice)
+library(naniar)
+library(openxlsx)
+library(psych)
+library(randomForest)
+library(readr)
+library(readxl)
+library(reshape2)
+library(ROCR)
+library(R.utils)
+library(scales)
+library(splitstackshape)
+library(tidyr)
+library(tidyverse)
+library(tinytex)
+library(tree)
+library(validate)
+library(xts)
+library(zoo)
+#library(vqv)
+library(ggbiplot)
+#install.packages("ggfortify")
+```
+# Covid Data
+```{r}
+#Read in the Covid Data:
+Covid <- read.csv("/Users/suzie/Desktop/MSc_DSA_2020/GitHub_Projects/CS5811_Distributed Data Analysis_GroupProject/CS5811_DistributedDataAnalysis_GroupProject/owid-covid-data.csv")
+```
+
+```{r}
+#Convert to date
+date <- Covid$date
+Covid$date <- as.Date(Covid$date, format = "%d/%m/%Y")
+#Convert to factor
+Covid$iso_code <- as.factor(Covid$iso_code)
+Covid$continent <- as.factor(Covid$continent)
+str(Covid)
+```
+
+```{r}
+# Viewing the missing values, as we have many variables
+vis_miss(Covid, warn_large_data=FALSE)
+```
+```{r}
+#viewing missing values in percentages 
+gg_miss_var(Covid, show_pct = TRUE)
+```
+```{r}
+#Missingness by continent
+gg_miss_case(Covid, facet = continent)
+#we notice that the missingness varies depending on the continent, so we will have to device a cleaning strategy suitable for the various corresponding datapoints/continents. 
+```
+```{r}
+#Graph indicating missing variables from the Covid data
+gg_miss_var_cumsum(Covid)
+```
+#2.=====================================
+# Temperature Data
+```{r}
+#Read in the data for the temperature:
+Weather2020 <- fread("/Users/suzie/Desktop/MSc_DSA_2020/GitHub_Projects/CS5811_Distributed Data Analysis_GroupProject/CS5811_DistributedDataAnalysis_GroupProject/2020.csv.gz", select = c(1:4))
+Weather2021 <- fread("/Users/suzie/Desktop/MSc_DSA_2020/GitHub_Projects/CS5811_Distributed Data Analysis_GroupProject/CS5811_DistributedDataAnalysis_GroupProject/2021.csv.gz", select = c(1:4))
+```
+
+```{r}
+#inspecting the weather data to ensure it coded in correctly
+head(Weather2020)
+head(Weather2021)
+```
+#Weather Data Tidying
+```{r}
+#we will take the average temperature only from column 3, TAVG
+#we will take the percipitation only from column 3, PRCP
+TAVG2020 <- filter(Weather2020, V3 == "TAVG")
+TAVG2021 <- filter(Weather2021, V3 == "TAVG")
+
+PRCP2020 <- filter(Weather2020, V3 == "PRCP")
+PRCP2021 <- filter(Weather2021, V3 == "PRCP")
+
+Weather2020 <- TAVG2020 %>% full_join(PRCP2020, by = c("V1", "V2"))
+Weather2021 <- TAVG2021 %>% full_join(PRCP2021, by = c("V1", "V2"))
+
+
+#Remove missing values
+#Data documentation from NOAA specifies that 9's in a field (e.g. 9999) indicate missing data or data that has not been received. We will check for these in our numerical values and remove if necessary. If the number of 9999 present in data is significant, we need to remove before performing calculations. 
+#Remove missing values
+table(Weather2020$V4.x==c(9999, 999))
+table(Weather2021$V4.x==c(9999, 999))
+dim(Weather2020)
+dim(Weather2021)
+
+```
+
+```{r}
+#Combining datasets for weather from 2 tables
+MasterWeather <- rbind(Weather2020, Weather2021)
+#Checking that combined as it should:
+nrow(Weather2020) + nrow(Weather2021)
+str(MasterWeather)
+```
+
+```{r}
+#Data validation, sense check for temperature, convert from fahrenheit to celsius
+MasterWeather$AvgTemp <- round(((MasterWeather$V4.x - 32) * (5/9)/10), digits = 2)
+head(MasterWeather)
+#remove 3 columns we do not need
+MasterWeather <- MasterWeather[, c(-3, -4, -5)]
+#as.data.frame
+MasterWeather <- as.data.frame(MasterWeather)
+```
+
+```{r}
+#Renaming Columns
+MasterWeather <- MasterWeather %>%
+  dplyr::rename(ID = V1, date = V2, Prcp = V4.y)
+#Checking the changes took place:
+head(MasterWeather)
+str(MasterWeather)
+#as.data.frame
+MasterWeather <- as.data.frame(MasterWeather)
+#converting date to date format to join with countryID and station
+date <- MasterWeather$date
+MasterWeather <- transform(MasterWeather, date = as.Date(as.character(date), "%Y%m%d"))
+MasterWeather <- as.data.frame(MasterWeather)
+
+head(MasterWeather)
+# Replace Prcp NAs with 0
+MasterWeather$Prcp <- MasterWeather$Prcp %>% replace(is.na(.), 0)
+
+
+```
+# CountryID & Stations
+```{r}
+#Read in the data for the Station Codes:
+CountryID <- read.csv("/Users/suzie/Desktop/MSc_DSA_2020/GitHub_Projects/CS5811_Distributed Data Analysis_GroupProject/CS5811_DistributedDataAnalysis_GroupProject/country codes.csv")
+Stations <- read.csv("/Users/suzie/Desktop/MSc_DSA_2020/GitHub_Projects/CS5811_Distributed Data Analysis_GroupProject/CS5811_DistributedDataAnalysis_GroupProject/ghcnd-stations.csv")
+#inspecting the data to ensure it coded in correctly
+head(CountryID)
+```
+```{r}
+head(Stations)
+```
+
+
+# Stations Data Tidying
+```{r}
+#Remove Excess NA and Irrelevant Columns
+head(Stations)
+Stations <- Stations[,c(2,3)]
+str(Stations)
+```
+
+```{r}
+#Merge Country data frame and Station data frame
+CombinedID <- merge(CountryID, Stations, all.x=TRUE)
+head(CombinedID)
+str(CombinedID)
+summary(CombinedID)
+```
+```{r}
+str(MasterWeather)
+```
+#3.=====================================
+#Merge Weather + CountryID + Stations into one 
+```{r}
+#Merge weather dataframe with combined station and country dataset
+#The default is FALSE, so that only rows with data from both x and y are included in the output. Setting argument all.x=TRUE, then extra rows will be added to the output, one for each row in x(CombinedID) that has no matching row in y(MasterWeather). These rows will have NAs in those columns that are usually filled with values from y. 
+#notice we now have 3409054 observations
+
+weathercombined <- merge(CombinedID, MasterWeather, all.x=TRUE)
+head(weathercombined, n=10)
+str(weathercombined)
+```
+
+```{r}
+#get a table of the number of NA per variable:
+weathercombined_NA_count <- apply(is.na(weathercombined),2,sum)
+weathercombined_NA_count
+```
+```{r}
+#exclude the missing value 
+#weathercombined <- na.omit(weathercombined)
+summary(weathercombined)
+str(weathercombined)
+head(weathercombined)
+```
+# Aggregated Weather + Station Data Tidying
+```{r}
+head(weathercombined, n=50)
+str(weathercombined)
+```
+```{r}
+#aggregate by average temperature
+AvgTemp <- aggregate(AvgTemp ~ Country + date, weathercombined, mean)
+summary(AvgTemp)
+str(AvgTemp)
+#so we have 73,210/72533 observations of temperature 
+       
+```
+```{r}
+AvgPrcp <- aggregate(Prcp ~ Country + date, weathercombined, mean)
+summary(AvgPrcp)
+str(AvgPrcp)
+
+AvgWea <- merge(AvgTemp, AvgPrcp, all.x=TRUE)
+head(AvgWea, n=50)
+str(AvgWea)
+```
+
+```{r}
+#Looking at the Covid data and the Temperature data for joining.
+str(Covid)
+str(Covid$date)
+min(Covid$date)
+max(Covid$date)
+#68,533 of covid observations
+
+summary(AvgWea)
+str(AvgWea$date)
+min(AvgWea$date)
+max(AvgWea$date)
+#so we have 73004 observations of temperature data
+
+
+#write text file to folder to avoid re-clean
+write.table(AvgWea, file = "AvgWea.txt", sep =",",
+            row.names = FALSE, col.names = TRUE, quote = FALSE)
+
+AvgWea <- read.csv("/Users/suzie/Desktop/MSc_DSA_2020/GitHub_Projects/CS5811_Distributed Data Analysis_GroupProject/CS5811_DistributedDataAnalysis_GroupProject/AvgWea.txt")
+```
+# Merge Covid & Aggregated Weather dataset
+```{r}
+#joining the Covid and average temperature dataset by date and location
+Covid.Temp <- Covid %>% full_join(AvgWea, by = c("date", "location" = "Country"))
+str(Covid.Temp)
+head(Covid.Temp)
+
+#Check that the data has been joined as it should and contains the date range we anticipated:
+min(Covid.Temp$date)
+max(Covid.Temp$date)
+
+#The analysis will be from date "2020-01-28" to "2021-02-12"
+diff_in_days<- difftime( max(Covid.Temp$date), min(Covid.Temp$date), units = c("days"))
+diff_in_days
+#408 days worth of data, From this we can see that the pandemic started at different points in time for different countries, as well as NAs not evenly distributed worldwide, as we can suspect that there maybe different reason for incomplete data in different regions/countries. For this reason, we will now look at the data by Region and then further drill down by country. This means we will carry out EDA on subsets of the data according to the presented variables/characteristics for each region/similar countries and then by country level. 
+
+```
+
+```{r}
+#So we have 210 codes for countries but we also have in the location variable 253 location names
+# some are states, not just country
+str(Covid.Temp$iso_code)
+nrow(table(Covid.Temp$location))
+```
+
+```{r}
+#Now, we filter by continent
+#Check duplicate for dates and country, each country for each day should only have one entry
+#then index by country & date
+UK <- subset(Covid.Temp, Covid.Temp$location == "United Kingdom")
+nrow(table(UK$date))
+names(UK)
+```
+```{r}
+tail(UK, n =50)
+```
+
+#4.=====================================
+# Principal Component Analysis
+
+## Data Prep
+```{r}
+# as we have a fairly wide dataset. PCA can be useful in identifying the Principal Components. Components are the underlying structure in the data. They are the directions where there is the most variance, the directions where the data is most spread out.
+
+#Removing character columns prior to SVM
+Covid.PCA <- Covid.Temp[, -c(1,2,4,34)]
+summary(Covid.PCA)
+str(Covid.PCA)
+#Change the NAs to 0 as data is precious
+Covid.PCA[is.na(Covid.PCA)] <- 0
+#Check that NAs are gone
+summary(Covid.PCA)
+str(Covid.PCA)
+# remove location column 
+Covid.PCA <- Covid.PCA[, -c(1)]
+# as dataframe
+Covid.PCA <- as.data.frame(Covid.PCA)
+# PCA
+Covid.pca <- prcomp(Covid.PCA, center = TRUE, scale. = TRUE)
+ 
+attributes(Covid.pca)
+```
+
+```{r}
+#this gives us the average of all variables
+Covid.pca$center
+#for sd of all vaariables
+Covid.pca$scale
+
+#inspect the pc loadings
+print(Covid.pca)
+```
+```{r}
+### calculate the proportion of explained variance (PEV) from the std values
+Covid.pca.var <- Covid.pca$sdev^2
+Covid.pca.PEV <- Covid.pca.var/sum(Covid.pca.var)
+### 4.2 plot the cumulative PEV
+opar <- par()
+plot(
+  cumsum(Covid.pca.PEV),
+  ylim = c(0,1),
+  xlab = 'PC',
+  ylab = 'cumulative PEV_Covid',
+  pch = 20,
+  col = 'orange'
+)
+abline(h = 0.8, col = 'red', lty = 'dashed')
+par(opar)
+#We can see that appriximately 80% of the variations are explained in PC1:PC14. 80% is covered by approx 14 variables PC1: PC14
+```
+```{r}
+### get and inspect the loadings
+Covid.pca.loadings <- Covid.pca$rotation
+Covid.pca.loadings
+summary(Covid.pca.loadings)
+
+summary(Covid.pca)
+# PC1 explains 19% of the total variance, which means that nearly one-fifth of the information in the dataset (53 variables) can be encapsulated by just that one Principal Component. PC1:PC14 explains 80% of the variance. So, by knowing the position of a sample in relation to just PC1 and PC14, you can get a very accurate view on where it stands in relation to other samples, as PC1:PC14 can explain 80% of the variance.
+```
+
+
+# Visualisation and animation
+## Animated Bar Plots
+```{r}
+new <- Covid.Temp %>%
+  filter(location  == "UK" | 
+           location  == "China" |
+           location  == "Japan" |
+           location  == "Germany" |
+           location  == "India" |
+           location  == "France" |
+           location  == "Italy" |
+           location  == "Brazil" |
+           location  == "Canada" ) %>%
+  group_by(location, date) 
+```
+```{r}
+# bar plot
+
+p <- new %>% ggplot(aes(x=location, y = new_cases, fill = location)) +
+  geom_bar(stat = "identity") +
+  geom_point(size = 1.5) +
+  scale_y_log10() +
+  theme_bw() +
+  guides(fill = F)
+
+p
+
+```
+
+
+```{r}
+# animated bar plot by date
+p + transition_time(date) +
+  labs(title = "Animated Bar Plot by Date")
+```
+```{r}
+# bar plot
+
+# animated bar plot by country
+p + transition_states(location) +
+  labs(title = "Animated Bar Plot by Date") +
+  shadow_mark() +
+  enter_grow()
+```
+#5.=====================================
+# Correlation and Multiple Regression
+
+```{r}
+str(Covid.PCA)
+# Performing PCA on 93468 obs. of  56 variables
+Covid.reg <- as.data.frame(Covid.PCA)
+
+
+```
+```{r}
+# Multiple conditions when adding new column to dataframe:
+Covid.regr <- Covid.reg %>% mutate(Traffic_warning =
+                     case_when(new_cases_per_million <= 250 ~ 1, #Green
+                               new_cases_per_million <= 500 ~ 2,  #Orange
+                               new_cases_per_million > 500 ~ 3)  #Red
+)
+
+summary(Covid.regr)
+table(Covid.regr$Traffic_warning)
+str(Covid.regr)
+```
+
+
+```{r}
+table(Covid.regr$AvgTemp)
+max(Covid.regr$new_cases_per_million)
+min(Covid.regr$new_cases_per_million)
+max(Covid.regr$new_cases)
+```
+### Graphical analysis
+```{r}
+# generate a histogram for each variable (and show them on the same page)
+#   note: titles and x labels are set to the name of the relevant variable
+opar <- par() # view current settings
+#You can customize many features of your graphs (fonts, colors, axes, titles) through graphic options, One way is to specify these options in through the par( ) function.
+par(mfrow = c(4,6))
+hist(Covid.regr[, 1], main = names(Covid.regr)[1], xlab = names(Covid.regr)[1])
+hist(Covid.regr[, 2], main = names(Covid.regr)[2], xlab = names(Covid.regr)[2])
+hist(Covid.regr[, 3], main = names(Covid.regr)[3], xlab = names(Covid.regr)[3])
+hist(Covid.regr[, 4], main = names(Covid.regr)[4], xlab = names(Covid.regr)[4])
+hist(Covid.regr[, 5], main = names(Covid.regr)[5], xlab = names(Covid.regr)[5])
+hist(Covid.regr[, 6], main = names(Covid.regr)[6], xlab = names(Covid.regr)[6])
+hist(Covid.regr[, 7], main = names(Covid.regr)[7], xlab = names(Covid.regr)[7])
+hist(Covid.regr[, 8], main = names(Covid.regr)[8], xlab = names(Covid.regr)[8])
+hist(Covid.regr[, 9], main = names(Covid.regr)[9], xlab = names(Covid.regr)[9])
+hist(Covid.regr[, 10], main = names(Covid.regr)[10], xlab = names(Covid.regr)[10])
+hist(Covid.regr[, 11], main = names(Covid.regr)[11], xlab = names(Covid.regr)[11])
+hist(Covid.regr[, 12], main = names(Covid.regr)[12], xlab = names(Covid.regr)[12])
+hist(Covid.regr[, 13], main = names(Covid.regr)[13], xlab = names(Covid.regr)[13])
+hist(Covid.regr[, 14], main = names(Covid.regr)[14], xlab = names(Covid.regr)[14])
+hist(Covid.regr[, 15], main = names(Covid.regr)[15], xlab = names(Covid.regr)[15])
+hist(Covid.regr[, 16], main = names(Covid.regr)[16], xlab = names(Covid.regr)[16])
+hist(Covid.regr[, 17], main = names(Covid.regr)[17], xlab = names(Covid.regr)[17])
+hist(Covid.regr[, 18], main = names(Covid.regr)[18], xlab = names(Covid.regr)[18])
+hist(Covid.regr[, 19], main = names(Covid.regr)[19], xlab = names(Covid.regr)[19])
+hist(Covid.regr[, 20], main = names(Covid.regr)[20], xlab = names(Covid.regr)[20])
+hist(Covid.regr[, 21], main = names(Covid.regr)[21], xlab = names(Covid.regr)[21])
+hist(Covid.regr[, 22], main = names(Covid.regr)[22], xlab = names(Covid.regr)[22])
+hist(Covid.regr[, 23], main = names(Covid.regr)[23], xlab = names(Covid.regr)[23])
+hist(Covid.regr[, 24], main = names(Covid.regr)[24], xlab = names(Covid.regr)[24])
+par(opar) # restore original settings
+```
+
+```{r}
+# individual variables inspection
+# Distribution of exploratory variables
+ggplot(data = Covid.regr, aes(x=total_cases)) + geom_histogram(bins=100) + theme_classic()
+ggplot(data = Covid.regr, aes(x=new_cases_per_million)) + geom_histogram(bins=100) + theme_classic()
+```
+```{r}
+# Scatter Plot x=AvgTemp, y=total_deaths
+ggplot(data = Covid.regr, aes(x=AvgTemp, y=total_deaths)) +
+  geom_point() + theme_classic()
+```
+```{r}
+# Scatter Plot x=total_cases, y=total_deaths
+
+ggplot(data = Covid.regr, aes(x=total_cases, y=total_deaths)) +
+  geom_point() + theme_classic()
+```
+```{r}
+# Scatter Plot x=AvgTemp, y=new_cases
+
+ggplot(data = Covid.regr, aes(x=AvgTemp, y=new_cases)) +
+  geom_point() + theme_classic()
+```
+```{r}
+pairs(Covid.regr)
+str(Covid.regr)
+```
+
+## Linear regression between New cases & average temperature 
+```{r}
+# Linear regression between New cases & average temperature 
+# Fitting simple regression model
+lm.fit = lm(new_cases_per_million~AvgTemp, data = Covid.regr)
+lm.fit
+```
+
+```{r}
+
+names(lm.fit)
+```
+
+
+```{r}
+# use aummary function to produce p-values and standard errors for the coefficients, R-squared statisitics and F-statistics for the model
+summary(lm.fit)
+```
+```{r}
+# for coefficient values
+coef(lm.fit)
+```
+
+```{r}
+confint(lm.fit)
+```
+```{r}
+predict(lm.fit, data.frame(AvgTemp = c(5, 10, 15)),
+                           interval = "confidence")
+
+predict(lm.fit, data.frame(AvgTemp = c(5, 10, 15)),
+                           interval = "prediction")
+```
+```{r}
+par(mfrow=c(2,2))
+plot(Covid.regr$AvgTemp, Covid.regr$new_cases_per_million, col = "blue", pch="+")
+abline(lm.fit, lwd=3, col="red")
+
+plot(Covid.regr$AvgTemp, Covid.regr$new_deaths_per_million, col = "blue", pch="+")
+abline(lm.fit, lwd=3, col="red")
+```
+```{r}
+par(mfrow=c(2,2))
+plot(predict(lm.fit), residuals(lm.fit))
+plot(predict(lm.fit), rstudent(lm.fit))
+```
+```{r}
+# Produce Leverage statistics using the hatvalues() function
+plot(hatvalues(lm.fit))
+which.max(hatvalues(lm.fit))
+# identifying  the index of the largest leverage statistics
+```
+## Multiple Regression: all variables
+```{r}
+# Multiple Regression: all variables
+lm.fit = lm(new_cases_per_million~., data = Covid.regr)
+lm.fit
+
+names(lm.fit)
+```
+```{r}
+# use summary function to produce p-values and standard errors for the coefficients, R-squared statisitics and F-statistics for the model
+summary(lm.fit)
+```
+```{r}
+# for coefficient values
+coef(lm.fit)
+```
+
+```{r}
+# obtaining a confidence interval for the coefficient estimates:
+confint(lm.fit)
+```
+```{r}
+#R-square values
+summary(lm.fit)$r.sq
+
+# RSE
+summary(lm.fit)$sigma
+```
+```{r}
+# Variance inflation
+library(car)
+vif(lm.fit)
+```
+
+# Clustering sample of master dataframe
+```{r}
+#Removing character columns prior to SVM
+Covid.cluster <- Covid.Temp[, -c(1,2,4,34)]
+summary(Covid.cluster)
+str(Covid.cluster)
+#Change the NAs to 0 as data is precious
+Covid.cluster[is.na(Covid.cluster)] <- 0
+#Check that NAs are gone
+summary(Covid.cluster)
+str(Covid.cluster)
+#creating Traffic_warning variable
+Covid.cluster <- Covid.cluster %>% mutate(Traffic_warning =
+                     case_when(new_cases_per_million <= 250 ~ 1, #Green
+                               new_cases_per_million <= 500 ~ 2,  #Orange
+                               new_cases_per_million > 500 ~ 3))  #Red
+
+# remove location column 
+#Covid.cluster <- Covid.cluster[, -c(1)]
+# as dataframe
+Covid.cluster <- as.data.frame(Covid.cluster)
+
+# random sampling of 100 observations for clustering, most likely will not produce significant results as this will take random sample of data from differemt date points.
+#Covid.cluster1 <- sample_n(Covid.cluster, 100)
+
+
+#Subset dataset by date(Feb01, 2021) and perfrom cluster analysis as the random ssample did not produce significant results. Random sampling was taking sample from dufferent dates, which does not allow foro comparison between the observations. See Appendix A 3.1.3 for screenshots. 
+Cluster.Feb01 <- subset(Covid.cluster, Covid.Temp$date == "2021-02-01")
+summary(Cluster.Feb01)
+str(Cluster.Feb01)
+#Feb01 contains 246 observations of  data, we will perform clustering on this date and compare to an earlier date in the pandemic
+
+```
+
+```{r}
+# Normalize before clustering analysis, avoid large data  variables to dominate the numbers... Cannot normalize text data so we have to remove 1st column, only quantitative data allowed for clustering analysis. 
+
+##e.g 
+z <- Cluster.Feb01[, -c(1)]
+means <- apply(z,2,mean) # 1 means row, 2 means column
+means
+sds <- apply(z,2,sd)
+sds
+nor <- scale(z,center=means,scale=sds)
+nor
+```
+
+```{r}
+# Calculate distance matrix: euclidean
+distance = dist(nor)
+distance
+print(distance, digits =2)
+```
+
+# Hierarchical agglomerative Clustering
+```{r}
+# Hierarchical agglomerative clustering  
+Covid.Hcluster = hclust(distance)
+plot(Covid.Hcluster)
+plot(Covid.Hcluster,labels=Cluster.Feb01$location,main='Cluster Dendrofram', hang=-1)
+rect.hclust(Covid.Hcluster, k = 10, border = "green")
+#boxing the data to 10 clusters..
+## note that the default is always - complete
+```
+```{r}
+# Cluster membership
+member = cutree(Covid.Hcluster,10)
+table(member)
+# From this we can see that majority of the observations/countries have been clustered into the first cluster. This method have not been very effective in identifying the clustered countries. 
+```
+
+```{r}
+# Characterizing clusters 
+aggregate(nor,list(member),mean) ###we use this to see which variables that contribute more/less..need to figure our what is going on. This finds the average mean for each variable in the cluster. What is important is that we want to compare across, and see which variable are contributing more or which are less. Variables that contrinute more will have a bigger average difference!!! e.g Looking at Cost Max value is 1.33 and min is -0.31, so the difference is about 1.6. If you look at Fixed_charge, 0.30 and -0.60 the difference is 0.9. Therefore we can say that the variable Cost contribute to this cluster formation more then Fixed_charge. Because it has a difference of 1.9 compared to 0.9....
+```
+
+```{r}
+##to compare with actual values:
+round(aggregate(Cluster.Feb01[,-c(1)],list(member),mean))
+##We can see that new deaths on Feb01 in cluster 10 is 10194 whereas for cluster 1 for the same day was 28. It would be interesting to see why the massive difference between the  two clusters, as this is based on data of the same day. 
+```
+```{r}
+# Silhouette Plot
+library(cluster) 
+plot(silhouette(cutree(Covid.Hcluster,10), distance))
+#we can note that cluster 1 contains 222 locations in one cluster..maybe we will try another method.
+```
+# K-means clustering
+```{r}
+###Non-hierarchical cluster analysis 
+nor[is.nan(nor)] <- 0
+nor[is.na(nor)] <- 0
+set.seed(123)##fixes the randomness
+kc<-kmeans(nor,10)
+kc
+#This gives very different results from before,  (between_SS / total_SS =  62.4 %) is quiet good results, this means that the clusters are performing well, changing the clusters to 20 to see results
+```
+
+```{r}
+#try 15 clusters
+set.seed(123)
+kc<-kmeans(nor,15)
+kc
+#  (between_SS / total_SS =  70.0 %), increased from 62.4 % when used 10 clusters, this is better results clustering with 15 clusters.
+
+#try 20 clusters
+set.seed(123)
+kc<-kmeans(nor,20)
+kc
+# then 20 clusters produced even better results, (between_SS / total_SS =  75.8 %)
+
+#try 25 clusters
+set.seed(123)
+kc<-kmeans(nor,25)
+kc
+# again, improves results, but only by 1% after 5 cluster increase,  (between_SS / total_SS =  78.7 %)
+
+#try 30 clusters
+set.seed(123)
+kc<-kmeans(nor,30)
+kc
+#slightly better again,  (between_SS / total_SS =  82.5 %)
+
+#try 35 clusters
+set.seed(123)
+kc<-kmeans(nor,35)
+kc
+#slightly better again,  (between_SS / total_SS =  83.9 %), nothing substantial for 5 more clusters
+```
+
+```{r}
+#so far 30 clusters produced the best results at reasonable clusters:
+set.seed(123)
+kc<-kmeans(nor,30)
+kc
+# then 20 clusters produced even better results, (between_SS / total_SS =  82.5 %)
+```
+
+
+
+#6.=====================================
+# Support Vector Classifier
+```{r}
+# Transform attribute type to three levels:
+Covid.SVM <- Covid.Temp %>% mutate(Traffic_warning =
+                     case_when(new_cases_per_million <= 250 ~ "Green", 
+                               new_cases_per_million <= 500 ~ "Orange",
+                               new_cases_per_million > 500 ~ "Red")
+)
+summary(Covid.SVM)
+str(Covid.SVM)
+
+```
+
+## Data Prep
+```{r}
+#Removing character columns prior to SVM
+Covid.SVM <- Covid.SVM[, -c(1,2,4,34)]
+summary(Covid.SVM)
+#Change the NAs to 0 as data is precious
+Covid.SVM[is.na(Covid.SVM)] <- 0
+#Check that NAs are gone
+summary(Covid.SVM)
+
+#as factor
+Covid.SVM$Traffic_warning <- as.factor(Covid.SVM$Traffic_warning)
+table(Covid.SVM$Traffic_warning)
+#Remove rows with 0s in Covid.SVM$Traffic_warning
+Covid.SVM2<-Covid.SVM[!(Covid.SVM$Traffic_warning=="0" | Covid.SVM$Traffic_warning==0),]
+str(Covid.SVM2)
+
+# Encoding the target feature (Traffic_warning) as factor
+Covid.SVM2$Traffic_warning = factor(Covid.SVM2$Traffic_warning, levels = c("Green", "Orange", "Red"))
+
+```
+
+## Stratified random split into the Training set and Test set
+```{r}
+## Using the createDataPartition function from caret package, does a stratified random split of the data. We need the same amount of data from all countries/locations. 
+library(caret)
+train.index <- createDataPartition(Covid.SVM2$location, p = .7, list = FALSE)
+training_set <- Covid.SVM2[ train.index,]
+test_set  <- Covid.SVM2[-train.index,]
+```
+
+```{r}
+summary(training_set)
+str(training_set)
+#check to encure all ocations afe inclusive
+table(training_set$location)
+str(test_set)
+```
+## Feature Scaling
+```{r}
+# Scaling the dataset without row 1 and row 58 the response variable
+training_set[-c(1,58)] = scale(training_set[-c(1,58)])
+test_set[-c(1,58)] = scale(test_set[-c(1,58)])
+str(training_set)
+str(test_set)
+# remove location column 
+training_set <- training_set[-c(1)]
+test_set <- test_set[-c(1)]
+
+#write text file to folder
+write.table(training_set, file = "training_set.txt", sep =",",
+            row.names = FALSE, col.names = TRUE, quote = FALSE)
+#write text file to folder
+write.table(test_set, file = "test_set.txt", sep =",",
+            row.names = FALSE, col.names = TRUE, quote = FALSE)
+
+```
+#7.=====================================
+# Fitting Radial Kernel: Traffic_warning ~ . 
+```{r}
+training_set <- read.csv("https://github.com/1043795/CS5811_DistributedDataAnalysis_GroupProject/blob/main/training_set.txt")
+test_set <- read.csv("https://github.com/1043795/CS5811_DistributedDataAnalysis_GroupProject/blob/main/test_set.txt")
+
+
+library(e1071)
+classifier = svm(formula = Traffic_warning ~ .,
+                 data = training_set,
+                 type = 'C-classification',
+                 kernel = 'radial')
+summary(classifier)
+```
+## Predicting the Test set results
+```{r}
+y_pred = predict(classifier, newdata = test_set[-57])
+```
+
+## Ploting the Confusion Matrix
+```{r}
+cm = table(test_set[, 57], y_pred)
+cm
+```
+```{r}
+# Printing accuracy rate
+accuracy = (cm[1,1] + cm[2,2]+ cm[3,3]) / (cm[1,1] + cm[2,2] + cm[3,3] + cm[1,2]+ cm[1,3]+ cm[2,1]+ cm[2,3]+ cm[3,1]+ cm[3,2])
+accuracy
+```
+
+## Applying k-Fold Cross Validation_Radial Kernel
+```{r}
+library(caret)
+library(lattice)
+library(ggplot2)
+# in creating the folds we specify the target feature (dependent variable) and # of folds
+folds = createFolds(training_set$Traffic_warning, k = 10)
+# in cv we are going to applying a created function to our 'folds'
+cv = lapply(folds, function(x) { # start of function
+  # in the next two lines we will separate the Training set into it's 10 pieces
+  training_fold = training_set[-x, ] # training fold =  training set minus (-) it's sub test fold
+  test_fold = training_set[x, ] # here we describe the test fold individually
+  # now apply (train) the classifer on the training_fold
+  classifier = svm(formula = Traffic_warning ~ .,
+                   data = training_fold,
+                   type = 'C-classification',
+                   kernel = 'radial')
+  # next step in the loop, we calculate the predictions and cm and we equate the accuracy
+  # note we are training on training_fold and testing its accuracy on the test_fold
+  y_pred = predict(classifier, newdata = test_fold[-57])
+  cm = table(test_fold[, 57], y_pred)
+  accuracy = (cm[1,1] + cm[2,2]+ cm[3,3]) / (cm[1,1] + cm[2,2] + cm[3,3] + cm[1,2]+ cm[1,3]+ cm[2,1]+ cm[2,3]+ cm[3,1]+ cm[3,2])
+  return(accuracy)
+})
+```
+
+```{r}
+# For CV we can see we have 10 folds/iterations each with slight variations of accuracy.
+knitr::include_graphics("cv.png")
+cv
+```
+## Mean of accuracy
+```{r}
+accuracy = mean(as.numeric(cv))
+accuracy
+```
+
+#8.=====================================
+# Fitting Linear Kernel: Traffic_warning ~ .
+```{r}
+library(e1071)
+classifier = svm(formula = Traffic_warning ~ .,
+                 data = training_set,
+                 type = 'C-classification',
+                 kernel = 'linear')
+
+summary(classifier)
+```
+## Predicting the Test set results
+```{r}
+y_pred = predict(classifier, newdata = test_set[-57])
+```
+
+## Ploting the Confusion Matrix
+```{r}
+cm = table(test_set[, 57], y_pred)
+cm
+```
+```{r}
+# Printing accuracy rate
+accuracy = (cm[1,1] + cm[2,2]+ cm[3,3]) / (cm[1,1] + cm[2,2] + cm[3,3] + cm[1,2]+ cm[1,3]+ cm[2,1]+ cm[2,3]+ cm[3,1]+ cm[3,2])
+accuracy
+```
+
+
+## Applying k-Fold Cross Validation_Linear Kernel
+```{r}
+library(caret)
+library(lattice)
+library(ggplot2)
+# in creating the folds we specify the target feature (dependent variable) and # of folds
+folds = createFolds(training_set$Traffic_warning, k = 10)
+# in cv we are going to applying a created function to our 'folds'
+cv = lapply(folds, function(x) { # start of function
+  # in the next two lines we will separate the Training set into it's 10 pieces
+  training_fold = training_set[-x, ] # training fold =  training set minus (-) it's sub test fold
+  test_fold = training_set[x, ] # here we describe the test fold individually
+  # now apply (train) the classifer on the training_fold
+  classifier = svm(formula = Traffic_warning ~ .,
+                   data = training_fold,
+                   type = 'C-classification',
+                   kernel = 'linear')
+  # next step in the loop, we calculate the predictions and cm and we equate the accuracy
+  # note we are training on training_fold and testing its accuracy on the test_fold
+  y_pred = predict(classifier, newdata = test_fold[-57])
+  cm = table(test_fold[, 57], y_pred)
+  accuracy = (cm[1,1] + cm[2,2]+ cm[3,3]) / (cm[1,1] + cm[2,2] + cm[3,3] + cm[1,2]+ cm[1,3]+ cm[2,1]+ cm[2,3]+ cm[3,1]+ cm[3,2])
+  return(accuracy)
+})
+```
+
+```{r}
+# For CV we can see we have 10 folds/iterations each with slightest variations of accuracy.
+cv
+```
+
+## Mean of accuracy
+```{r}
+accuracy = mean(as.numeric(cv))
+accuracy
+```
+
+```{r}
+str(training_set)
+```
+
+
+
+
+#9.=====================================
+# Fitting Linear SVM: Traffic_warning~AvgTemp 
+```{r}
+summary(training_set)
+library(e1071)
+classifier = svm(formula = Traffic_warning ~ AvgTemp,
+                 data = training_set,
+                 type = 'C-classification',
+                 kernel = 'linear')
+
+summary(classifier)
+```
+## Predicting the Test set results
+```{r}
+y_pred = predict(classifier, newdata = test_set[-57])
+```
+
+## Ploting the Confusion Matrix
+```{r}
+cm = table(test_set[, 57], y_pred)
+cm
+```
+
+```{r}
+# Printing accuracy rate
+accuracy = (cm[1,1] + cm[2,2]+ cm[3,3]) / (cm[1,1] + cm[2,2] + cm[3,3] + cm[1,2]+ cm[1,3]+ cm[2,1]+ cm[2,3]+ cm[3,1]+ cm[3,2])
+accuracy
+```
+## Applying k-Fold Cross Validation_Linear Kernel
+```{r}
+library(caret)
+library(lattice)
+library(ggplot2)
+# in creating the folds we specify the target feature (dependent variable) and # of folds
+folds = createFolds(training_set$Traffic_warning, k = 10)
+# in cv we are going to applying a created function to our 'folds'
+cv = lapply(folds, function(x) { # start of function
+  # in the next two lines we will separate the Training set into it's 10 pieces
+  training_fold = training_set[-x, ] # training fold =  training set minus (-) it's sub test fold
+  test_fold = training_set[x, ] # here we describe the test fold individually
+  # now apply (train) the classifer on the training_fold
+  classifier = svm(formula = Traffic_warning ~ AvgTemp,
+                   data = training_fold,
+                   type = 'C-classification',
+                   kernel = 'linear')
+  # next step in the loop, we calculate the predictions and cm and we equate the accuracy
+  # note we are training on training_fold and testing its accuracy on the test_fold
+  y_pred = predict(classifier, newdata = test_fold[-57])
+  cm = table(test_fold[, 57], y_pred)
+  accuracy = (cm[1,1] + cm[2,2]+ cm[3,3]) / (cm[1,1] + cm[2,2] + cm[3,3] + cm[1,2]+ cm[1,3]+ cm[2,1]+ cm[2,3]+ cm[3,1]+ cm[3,2])
+  return(accuracy)
+})
+```
+
+```{r}
+# For CV we can see we have 10 folds/iterations each with slight variations of accuracy.
+cv
+```
+
+## Mean of accuracy
+```{r}
+accuracy = mean(as.numeric(cv))
+accuracy
+```
+
+
+
+#10.=====================================
+# Fitting Linear SVM to UK data only for tuning the best model
+```{r}
+## Using the createDataPartition function from caret package, does a stratified random split of the data.
+## Using the createDataPartition function from caret package, does a stratified random split of the data. We need to filter for Uk only 
+library(caret)
+# Re-run because location had been removed previously
+train.index <- createDataPartition(Covid.SVM2$location, p = .7, list = FALSE)
+training_set <- Covid.SVM2[ train.index,]
+test_set  <- Covid.SVM2[-train.index,]
+
+UK.training_set <- subset(training_set, training_set$location == "United Kingdom")
+UK.test_set <- subset(test_set, test_set$location == "United Kingdom")
+```
+```{r}
+summary(UK.training_set)
+# remove location column 
+UK.training_set <- UK.training_set[-c(1)]
+UK.test_set <- UK.test_set[-c(1)]
+
+library(e1071)
+classifier = svm(formula = Traffic_warning ~ .,
+                 data = UK.training_set,
+                 type = 'C-classification',
+                 kernel = 'linear', scale = TRUE)
+summary(classifier)
+```
+## Predicting the Test set results
+```{r}
+y_pred = predict(classifier, newdata = UK.test_set[-57])
+```
+
+## Ploting the Confusion Matrix
+```{r}
+cm = table(UK.test_set[, 57], y_pred)
+cm
+```
+```{r}
+# Printing accuracy rate
+accuracy = (cm[1,1] + cm[2,2]+ cm[3,3]) / (cm[1,1] + cm[2,2] + cm[3,3] + cm[1,2]+ cm[1,3]+ cm[2,1]+ cm[2,3]+ cm[3,1]+ cm[3,2])
+accuracy
+```
+## Applying k-Fold Cross Validation_Linear Kernel
+```{r}
+library(caret)
+library(lattice)
+library(ggplot2)
+# in creating the folds we specify the target feature (dependent variable) and # of folds
+folds = createFolds(UK.training_set$Traffic_warning, k = 10)
+# in cv we are going to applying a created function to our 'folds'
+cv = lapply(folds, function(x) { # start of function
+  # in the next two lines we will separate the Training set into it's 10 pieces
+  training_fold = UK.training_set[-x, ] # training fold =  training set minus (-) it's sub test fold
+  test_fold = UK.training_set[x, ] # here we describe the test fold individually
+  # now apply (train) the classifer on the training_fold
+  classifier = svm(formula = Traffic_warning ~ .,
+                   data = training_fold,
+                   type = 'C-classification',
+                   kernel = 'linear')
+  # next step in the loop, we calculate the predictions and cm and we equate the accuracy
+  # note we are training on training_fold and testing its accuracy on the test_fold
+  y_pred = predict(classifier, newdata = test_fold[-57])
+  cm = table(test_fold[, 57], y_pred)
+  accuracy = (cm[1,1] + cm[2,2]+ cm[3,3]) / (cm[1,1] + cm[2,2] + cm[3,3] + cm[1,2]+ cm[1,3]+ cm[2,1]+ cm[2,3]+ cm[3,1]+ cm[3,2])
+  return(accuracy)
+})
+```
+
+```{r}
+# For CV we can see we have 10 folds/iterations each with slight variations of accuracy.
+cv
+```
+
+## Mean of accuracy
+```{r}
+accuracy = mean(as.numeric(cv))
+accuracy
+```
+#11.=====================================
+##tune model using smaller dataset UK = 10 rows
+```{r}
+#tune usin smaller dataset, too large to process
+UK.training_set1 <- sample_n(UK.training_set, 10)
+UK.test_set1 <- sample_n(UK.test_set, 10)
+library(e1071)
+classifier = svm(formula = Traffic_warning ~ .,
+                 data = UK.training_set1,
+                 type = 'C-classification',
+                 kernel = 'linear', scale = TRUE)
+summary(classifier)
+set.seed(123)
+tune_classifier <- tune(svm, Traffic_warning~., data = UK.training_set1, type = 'C-classification',
+                 kernel = 'linear',
+     ranges = list(epsilon = seq(0,1,0.1), cost = 2 ^(2:7)))
+plot(tune_classifier)
+
+```
+```{r}
+summary(classifier)
+```
+```{r}
+summary(tune_classifier)
+```
+
+
+
+## choose the best model
+```{r}
+# choose the best model
+final_svm_model <- tune_classifier$best.model
+summary(final_svm_model)
+```
+## Predicting the Test set results
+```{r}
+y_pred = predict(final_svm_model, newdata = UK.test_set1[-57])
+```
+
+## Ploting the Confusion Matrix
+```{r}
+cm = table(UK.test_set1[, 57], y_pred)
+cm
+```
+```{r}
+# Printing accuracy rate
+accuracy = (cm[1,1] + cm[2,2]+ cm[3,3]) / (cm[1,1] + cm[2,2] + cm[3,3] + cm[1,2]+ cm[1,3]+ cm[2,1]+ cm[2,3]+ cm[3,1]+ cm[3,2])
+accuracy
+```
+## Applying k-Fold Cross Validation
+```{r}
+library(caret)
+library(lattice)
+library(ggplot2)
+# in creating the folds we specify the target feature (dependent variable) and # of folds
+folds = createFolds(UK.training_set1$Traffic_warning, k = 10)
+# in cv we are going to applying a created function to our 'folds'
+cv = lapply(folds, function(x) { # start of function
+  # in the next two lines we will separate the Training set into it's 10 pieces
+  training_fold = UK.training_set1[-x, ] # training fold =  training set minus (-) it's sub test fold
+  test_fold = UK.training_set1[x, ] # here we describe the test fold individually
+  # now apply (train) the classifer on the training_fold
+  classifier = svm(formula = Traffic_warning ~ .,
+                   data = training_fold,
+                   type = 'C-classification',
+                   kernel = 'linear', scale = TRUE)
+  # next step in the loop, we calculate the predictions and cm and we equate the accuracy
+  # note we are training on training_fold and testing its accuracy on the test_fold
+  y_pred = predict(classifier, newdata = test_fold[-57])
+  cm = table(test_fold[, 57], y_pred)
+  accuracy = (cm[1,1] + cm[2,2]+ cm[3,3]) / (cm[1,1] + cm[2,2] + cm[3,3] + cm[1,2]+ cm[1,3]+ cm[2,1]+ cm[2,3]+ cm[3,1]+ cm[3,2])
+  return(accuracy)
+})
+```
+
+```{r}
+# For CV we can see we have 10 folds/iterations each with slight variations of accuracy.
+cv
+```
+
+## Mean of accuracy
+```{r}
+accuracy = mean(as.numeric(cv))
+accuracy
+```
+
+#12.=====================================
+# Random Forest
+```{r}
+str(Cluster.Feb01)
+#Change the NAs to 0 as data is precious
+Feb01_rf <- as.data.frame(Cluster.Feb01)
+#Check that NAs are removed correctly and no other issues
+summary(Feb01_rf)
+#Check that NAs are gone
+str(Feb01_rf)
+#convert $ Traffic_warning to a factor
+Feb01_rf$Traffic_warning <- as.factor(Feb01_rf$Traffic_warning)
+#now we have 56 variables all numeric and HDI_Rank as a factor, we are ready for random forest classification
+```
+```{r}
+#Data Partition
+#set random seed, so tht we can make this analysis repeatable, we will do a 70/30 for trining and testing data
+names(Feb01_rf)
+set.seed(123)
+ind <- sample(2, nrow(Feb01_rf), replace = TRUE, prob = c(0.7, 0.3))
+train_rf <- droplevels(Feb01_rf[ind==1, ])
+test_rf <- droplevels(Feb01_rf[ind==2, ])
+train_rf$Traffic_warning <- as.factor(train_rf$Traffic_warning)
+test_rf$Traffic_warning <- as.factor(test_rf$Traffic_warning)
+str(train_rf)
+```
+
+```{r}
+### 2.1 define a formula for predicting the level
+Feb01_rf_formula =  Traffic_warning ~ total_cases + new_deaths + new_cases_smoothed_per_million + reproduction_rate + hosp_patients_per_million + weekly_hosp_admissions_per_million + new_tests_per_thousand + tests_per_case + new_vaccinations + people_fully_vaccinated_per_hundred + population_density + gdp_per_capita + female_smokers + life_expectancy + new_cases + new_deaths_smoothed + total_deaths_per_million + icu_patients + weekly_icu_admissions + new_tests + new_tests_smoothed + total_vaccinations + new_vaccinations_smoothed + new_vaccinations_smoothed_per_million + median_age + extreme_poverty + male_smokers + human_development_index + new_cases_smoothed + total_cases_per_million + new_deaths_per_million + icu_patients_per_million + weekly_icu_admissions_per_million + total_tests + new_tests_smoothed_per_thousand + people_vaccinated + total_vaccinations_per_hundred + stringency_index + aged_65_older + cardiovasc_death_rate + handwashing_facilities + total_deaths + new_cases_per_million + new_deaths_smoothed_per_million + hosp_patients + weekly_hosp_admissions + total_tests_per_thousand + positive_rate + people_fully_vaccinated + people_vaccinated_per_hundred + population + aged_70_older +  diabetes_prevalence + hospital_beds_per_thousand + AvgTemp + Prcp
+### 2.2 train a decision tree
+library(tree)
+Feb01_rf_dt <- tree(Feb01_rf_formula, data = train_rf)
+
+##prune the tree using cross-validation
+## note: when trees have the same classification error
+## select the one with fewer nodes
+Feb01_rf_cv <- cv.tree(Feb01_rf_dt, FUN=prune.misclass)
+pruned_tree_size <- rev(Feb01_rf_cv$size)[which.min(rev(Feb01_rf_cv$dev))]
+p_dt_Feb01_rf <- prune.misclass(Feb01_rf_dt, best = pruned_tree_size)
+### 2.4 train a random forest model
+rf_Feb01_model <- randomForest(Feb01_rf_formula, ntree = 500, importance = T, data = train_rf)
+#looking attributes available
+attributes(rf_Feb01_model)
+#we can view class errors here as well as the OOB error rate
+#this is a model of the Traffic_warning variables as a function of all remaining 57 variables using the Feb01 data, and this random is a classification because the Traffic_warning is a factor variables. We have here the default number pf tree at 500, mtry = 7; the Out Of Bag error rate is 7.22% which is good, however will tune this to provide better classification. 
+print(rf_Feb01_model)
+#alternatively we can also see only Confusion matrix
+rf_Feb01_model$confusion 
+```
+
+
+#Prediction using Random forest - train data
+```{r}
+library(caret)
+p1_rf <- predict(rf_Feb01_model, train_rf) 
+cM1 <- confusionMatrix(p1_rf, train_rf$Traffic_warning)
+cM1
+#the accuracy of the model is  high at first attempt at 1, and it is also perform well on 95% confidence level. 
+#Sensitivity test: all performed above 100%; classification is 100% as there was no misclassification.
+```
+```{r}
+### 3.1 compute the prediction for the test set with the pruned tree model
+###   note: the Traffic_warning  attribute should be excluded from the test data set
+dt_Feb01_pred <- predict(p_dt_Feb01_rf, test_rf[, -58], type = "class")
+
+### 3.2 compute the prediction for the test set with the random forest model
+###   note: the income attribute should be excluded from the test data set
+rf_Feb01_pred <- predict(rf_Feb01_model, test_rf[,-58], type= "class")
+
+### 3.3 create a table with actual and predicted values
+###   for the pruned decision tree and random forest models
+Feb01_pred_results <- data.frame(
+  actual = test_rf$Traffic_warning,
+  p_dt = dt_Feb01_pred,
+  rf = rf_Feb01_pred
+)
+
+### 3.4 create a contingency table of the actual VS predicted for each model
+table_p_dt_results <- table(Feb01_pred_results[,c('actual','p_dt')])
+table_rf_results <- table(Feb01_pred_results[,c('actual','rf')])
+### 3.4 calculate accuracy values from the contingency tables
+acc_p_dt_results <- sum(diag(table_p_dt_results)) / sum(table_p_dt_results)
+acc_p_dt_results
+acc_rf_results <- sum(diag(table_rf_results)) / sum(table_rf_results)
+acc_rf_results
+
+#so we have 98% for the decision tree model and 95% for the random forest model accuracy rate. Which is as anticipated, as this is used test data that the model have not seen before. 
+```
+```{r}
+#confusion matrix
+library(caret)
+p1_rf <- predict(rf_Feb01_model, train_rf) 
+cM1 <- confusionMatrix(p1_rf, train_rf$Traffic_warning)
+cM1
+
+p2_rf <- predict(rf_Feb01_model, test_rf[, -58], type = "class")
+cM2 <- confusionMatrix(p2_rf,test_rf$Traffic_warning)
+cM2
+#so this test data have not been seen by the prediction model, so this accuracy rate of 95% here is seen as a more accurate representation of the accuracy of the assessment of the model. 
+```
+```{r}
+#Error rate of Random forest
+plot(rf_Feb01_model)
+```
+
+```{r}
+#tune mtry
+#we will make use of 300 trees, 
+
+tune_rf <- tuneRF(train_rf[,-58], train_rf[,58],
+       stepFactor = 0.5, 
+       plot = TRUE,
+       ntreeTry = 300,
+       trace = TRUE,
+       improve = 0.05)
+```
+```{r}
+
+#Going back to the model; making changes to trees numbers to 300 and mtry = 28 as indicated above. 
+
+rf_Feb01_model2 <- randomForest(Feb01_rf_formula, 
+                               ntree = 300,
+                               mtry = 28,
+                               importance = T,proximity = T, 
+                               data = train_rf)
+attributes(rf_Feb01_model2)
+print(rf_Feb01_model2)
+#alternatively we can also see only Confusion matrix
+rf_Feb01_model2$confusion
+#confusion matrix for pruned model for train data nd test data
+p1_rf <- predict(rf_Feb01_model2, train_rf) 
+cM1 <- confusionMatrix(p1_rf, train_rf$Traffic_warning)
+cM1
+# compared to previous model with accuracy rate of 86% aswell, so this have not improved the model nor made ot worse. However there is some changes in sensitivity test for Class 2 and 3. 
+p2_rf <- predict(rf_Feb01_model2, test_rf[, -58], type = "class")
+cM2 <- confusionMatrix(p2_rf,test_rf$Traffic_warning)
+cM2
+```
+```{r}
+# we can see a histogram of number of nodes in each of the 300 trees. 
+# The biggest bar is close to 100, there are 60 trees that contains about 4 nodes in them, there are fewer trees with less than 10 nodes in them. 
+hist(treesize(rf_Feb01_model2),
+     main = "No. of Nodes for the trees",
+     col = "pink")
+```
+```{r}
+#Variable Importance
+#Using this we can find out which variable play a important role in the model. 
+##for the top 10 variables
+varImpPlot(rf_Feb01_model2, sort = T,
+           n.var = 10,
+           main = "Top10 - Variable Importance")
+```
+```{r}
+#can also get the quantitative values for the important variables 
+importance(rf_Feb01_model2)
+```
+
+```{r}
+#to find out which predictor variables are used in the random forest 
+varUsed(rf_Feb01_model2)
+```
+
+```{r}
+## Multi-dimensional Scaling Plot of Proximity matrix from randomForest
+MDSplot(rf_Feb01_model2, train_rf$Traffic_warning, 
+        main = "Multi-dimensional Scaling Plot of Proximity matrix")
+#From here we can see the dissimilarity matrix on a two-dimensional scatter plot. By looking at the relative position of the points, we can easily see clusters that are apparent. 
+```
